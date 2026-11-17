@@ -14,6 +14,8 @@ const now = atom({ plugin: 'sennable-flow', key: 'now' } as const, 0)
 const lastMainAt = atom({ plugin: 'sennable-flow', key: 'lastMainAt' } as const, 0)
 const lastWorkerAt = atom({ plugin: 'sennable-flow', key: 'lastWorkerAt' } as const, 0)
 const mode = atom({ plugin: 'sennable-flow', key: 'mode' } as const, { on: false })
+const egMode = atom({ plugin: 'sennable-flow', key: 'egMode' } as const, { on: false })
+const egAvailable = atom({ plugin: 'sennable-flow', key: 'egAvailable' } as const, false)
 const keepWarm = atom({ plugin: 'sennable-flow', key: 'keepWarm' } as const, { on: false, until: 0, pings: 0, retryAt: 0 })
 const locks = atom({ plugin: 'sennable-flow', key: 'locks' } as const, [])
 
@@ -96,17 +98,28 @@ const ON_NOTE =
   'orchestrate it: read ~/.claude/skills/sennable-flow/SKILL.md first and follow it (plan, Jev picks model/effort/skill per task, ' +
   'delegate to sennable-worker, review). Questions, look-ups and one-line edits: answer directly, without workers. ' +
   'The user switches it off with /sennable off or the switch on the band.'
+// The same, for the elephant/goldfish method: command files in the project's .claude/commands.
+const EG_NOTE =
+  '[elephant/goldfish ON] The user has switched the elephant/goldfish method on for this project. For real work, read and follow ' +
+  'the matching command file in .claude/commands: a bug -> eg-fix-bug.md, a new feature -> eg-new-feature.md, an idea to explore -> ' +
+  'eg-brainstorm.md, a spec or PRD -> eg-prd.md; run eg-precommit-review.md before any commit. Each file\'s own triviality gate and ' +
+  'stop-and-ask points still apply. Questions, look-ups and trivial edits (typos, version bumps, formatter-only diffs): answer directly. ' +
+  'If sennable-flow is also on, sennable-flow plans and delegates and the elephant/goldfish steps become part of each task. ' +
+  'The user switches this off with /eg off or the switch on the band.'
 // Prompts the user typed (terminal, Remote Control, the app); not notifications or other sessions.
 const USER_ORIGINS = new Set(['composer', 'bridge', 'sdk'])
 
-async function flagPath($: EngineInterface): Promise<string> {
+const SENNABLE_FLAG = 'sennable-flow.json'
+const EG_FLAG = 'elephant-goldfish.json'
+
+async function flagPath($: EngineInterface, file: string): Promise<string> {
   const home = (await $.env.get('USERPROFILE')) || (await $.env.get('HOME')) || ''
-  return `${home}/.claude/sennable-flow.json`
+  return `${home}/.claude/${file}`
 }
 
-async function loadSwitch($: EngineInterface): Promise<boolean> {
+async function loadSwitch($: EngineInterface, file: string): Promise<boolean> {
   try {
-    const text = await $.fs.read(await flagPath($))
+    const text = await $.fs.read(await flagPath($, file))
     return (JSON.parse(String(text)) as { on?: unknown }).on === true
   } catch {
     return false
@@ -114,14 +127,21 @@ async function loadSwitch($: EngineInterface): Promise<boolean> {
 }
 
 // True when the flag was saved for other sessions; the switch holds in this session either way.
-async function setSwitch($: EngineInterface, on: boolean): Promise<boolean> {
-  await update($, mode, () => ({ on }))
+async function setSwitch($: EngineInterface, target: typeof mode | typeof egMode, file: string, on: boolean): Promise<boolean> {
+  await update($, target, () => ({ on }))
   try {
-    await $.fs.write(await flagPath($), JSON.stringify({ on, changed: new Date().toISOString() }) + '\n')
+    await $.fs.write(await flagPath($, file), JSON.stringify({ on, changed: new Date().toISOString() }) + '\n')
     return true
   } catch {
     return false
   }
+}
+
+// Whether the project at `cwd` has at least one .claude/commands/eg-*.md; the elephant/goldfish switch applies only then.
+async function detectEg($: EngineInterface, cwd: string): Promise<boolean> {
+  const dir = `${cwd.replace(/\\/g, '/')}/.claude/commands`
+  const entries = await $.fs.list(dir).catch(() => [])
+  return entries.some(entry => /^eg-.+\.md$/.test(entry.name))
 }
 
 const TOOL = 'mcp__sennable-flow__progress'
@@ -1042,8 +1062,16 @@ export const register: Register = (on, options) => {
       name: 'sennable',
       description: 'sennable-flow switch: /sennable on, /sennable off, or /sennable to see the state',
     })
-    const isOn = await loadSwitch($)
+    await $.command.register({
+      name: 'eg',
+      description: 'elephant/goldfish switch: /eg on, /eg off, or /eg to see the state',
+    })
+    const isOn = await loadSwitch($, SENNABLE_FLAG)
     await update($, mode, () => ({ on: isOn }))
+    const isEg = await loadSwitch($, EG_FLAG)
+    await update($, egMode, () => ({ on: isEg }))
+    const hasEg = await detectEg($, await $.session.cwd())
+    await update($, egAvailable, () => hasEg)
 
     // Ticks the running agents' clocks and the band's cache countdowns; quiet until the
     // session has made a request (no countdown yet) and nothing runs.
@@ -1076,7 +1104,7 @@ export const register: Register = (on, options) => {
   on('command.run', { command: 'sennable' }, async ($, e) => {
     const arg = e.args.trim().toLowerCase()
     if (arg === 'on' || arg === 'off') {
-      const saved = await setSwitch($, arg === 'on')
+      const saved = await setSwitch($, mode, SENNABLE_FLAG, arg === 'on')
       const text = arg === 'on'
         ? 'sennable-flow is ON everywhere: real work gets planned and delegated; quick things are answered directly.'
         : 'sennable-flow is OFF: everything is answered in this session unless you type /sennable-flow.'
@@ -1086,11 +1114,38 @@ export const register: Register = (on, options) => {
     return { text: `sennable-flow is ${isOn ? 'ON' : 'OFF'}. Use /sennable on or /sennable off.` }
   })
 
-  // While on, each prompt the user typed gets the orchestration note; slash commands do not.
+  // The elephant/goldfish switch; it only has an effect in a project with .claude/commands/eg-*.md.
+  on('command.run', { command: 'eg' }, async ($, e) => {
+    const arg = e.args.trim().toLowerCase()
+    const hasEg = await read($, egAvailable)
+    const noEg = hasEg ? '' : ' The switch has no effect here because this project has no /eg-* commands.'
+    if (arg === 'on' || arg === 'off') {
+      const saved = await setSwitch($, egMode, EG_FLAG, arg === 'on')
+      const text = arg === 'on'
+        ? 'elephant/goldfish is ON: real work follows the matching /eg-* command file; quick things are answered directly.'
+        : 'elephant/goldfish is OFF: work is not routed to the /eg-* command files.'
+      return { text: `${saved ? text : `${text} (Could not save ~/.claude/elephant-goldfish.json, so other sessions keep their old state.)`}${noEg}` }
+    }
+    const { on: isOn } = await read($, egMode)
+    return { text: `elephant/goldfish is ${isOn ? 'ON' : 'OFF'}. Use /eg on or /eg off.${noEg}` }
+  })
+
+  // The project can change under a session; look again where it is now.
+  on('classic.CwdChanged', async ($, e, next) => {
+    const hasEg = await detectEg($, e.new_cwd)
+    await update($, egAvailable, () => hasEg)
+    return next(e)
+  })
+
+  // While on, each prompt the user typed gets the orchestration note, and the elephant/goldfish note when
+  // that switch is on in a project that has the command files; slash commands get neither.
   on('prompt.submit', async ($, e, next) => {
+    if (!USER_ORIGINS.has(e.origin.kind) || e.text.trimStart().startsWith('/')) return next(e)
     const { on: isOn } = await read($, mode)
-    if (!isOn || !USER_ORIGINS.has(e.origin.kind) || e.text.trimStart().startsWith('/')) return next(e)
-    return next({ ...e, context: [...(e.context ?? []), ON_NOTE] })
+    const { on: isEg } = await read($, egMode)
+    const notes = [isOn ? ON_NOTE : '', isEg && (await read($, egAvailable)) ? EG_NOTE : ''].filter(Boolean)
+    if (!notes.length) return next(e)
+    return next({ ...e, context: [...(e.context ?? []), ...notes] })
   })
 
   on('command.run', { command: 'agents-info' }, async $ => {
@@ -1468,7 +1523,7 @@ export const register: Register = (on, options) => {
         key="sennable-switch"
         label={isOn ? '◉ sennable-flow on' : '○ sennable-flow off'}
         plain
-        onPress={() => void setSwitch($, !isOn)}
+        onPress={() => void setSwitch($, mode, SENNABLE_FLAG, !isOn)}
       />
     )
     // Keep-warm: off by default; on, it shows when the next ping fires and how long it stays on.
@@ -1488,6 +1543,15 @@ export const register: Register = (on, options) => {
         }
       />
     )
+    // Elephant/goldfish: shown only in a project that has .claude/commands/eg-*.md.
+    const { on: isEg } = await read($, egMode)
+    const hasEg = await read($, egAvailable)
+    const egLabel = isEg ? '◉ elephant/goldfish' : '○ elephant/goldfish'
+    const egButton = hasEg ? (
+      <Button key="sennable-eg" label={egLabel} plain onPress={() => void setSwitch($, egMode, EG_FLAG, !isEg)} />
+    ) : null
+    // The room the button takes from the Svg: its text and a small gap.
+    const egWidth = hasEg ? textWidth(egLabel, 13) + 12 : 0
 
     // No flow running: the slim band, the switch and the session cache countdown.
     if (f === null) {
@@ -1497,12 +1561,13 @@ export const register: Register = (on, options) => {
       const agentsButton = <Button key="sennable-agents" label="agents" plain onPress={() => void togglePane($)} />
       if ('Svg' in ui) {
         const { Svg } = ui
-        const width = Math.max(160, Math.min(1400, (e.props.bodyColumns || 100) * 8 - 220 - 80 - textWidth(warmLabel, 13)))
+        const width = Math.max(160, Math.min(1400, (e.props.bodyColumns || 100) * 8 - 220 - 80 - textWidth(warmLabel, 13) - egWidth))
         return (
           <Box flexDirection="row" alignItems="center" gap={1}>
             {toggle}
             {agentsButton}
             {warmButton}
+            {egButton}
             <Svg source={slimSvg(width, hint, mainLeft)} alt={[hint, cache].filter(Boolean).join(', ')} width={width} height={H} />
           </Box>
         )
@@ -1512,6 +1577,7 @@ export const register: Register = (on, options) => {
           {toggle}
           {agentsButton}
           {warmButton}
+          {egButton}
           <Text dimColor>{hint}</Text>
           {cache ? <Text color={mainLeft !== null && mainLeft <= CACHE_WARN_MS ? AMBER : undefined} dimColor={mainLeft === null || mainLeft > CACHE_WARN_MS}>{cache}</Text> : null}
         </Box>
@@ -1550,12 +1616,13 @@ export const register: Register = (on, options) => {
       // About 8 CSS px per reported column; the rest is the count, the dismiss
       // and their gaps. No floor above the slot: a row wider than it would wrap.
       // Floor 300: room for the title, the count pill and the crab; a narrower slot wraps the buttons below.
-      const width = Math.max(300, Math.min(1600, (e.props.bodyColumns || 100) * 8 - 300 - textWidth(warmLabel, 13)))
+      const width = Math.max(300, Math.min(1600, (e.props.bodyColumns || 100) * 8 - 300 - textWidth(warmLabel, 13) - egWidth))
       return (
         <Box flexDirection="row" alignItems="center" gap={1}>
           <Svg source={rowSvg(f, width, isWorking, extras, crabFamily)} alt={`${f.title}: ${label(f)}, ${percent}${mixText ? ', ' + mixText : ''}${cacheText ? ', ' + cacheText : ''}`} width={width} height={H} />
           {toggle}
           {warmButton}
+          {egButton}
           {crewButton}
           {dismiss}
         </Box>
@@ -1583,6 +1650,7 @@ export const register: Register = (on, options) => {
         <Text color={CLAY}>▣</Text>
         {toggle}
         {warmButton}
+        {egButton}
         {crewButton}
         {dismiss}
       </Box>

@@ -10,6 +10,7 @@ The progress band and agents panel for the `/sennable-flow` skill (`~/.claude/sk
 
 - **agents button**: `agents` on the slim band, `agents ×N` on the full band; opens or closes the agents panel (same as `/agents-info`).
 - **keep warm** (this session only, off by default): while on, when nothing has happened for 55 minutes the mod sends one ping, 5 minutes before the main cache would expire. A ping is `$.model.fork`: it re-sends the conversation as last sent, so it is served from cache and the cache's 1-hour clock restarts. It adds nothing to the transcript and runs no tools. It switches itself off after 3 hours. The button shows `◉ keep warm · next ping m:ss · h:mm left`. Cost per ping is a cache read of the whole conversation (about $0.04 at 200k tokens on Opus 5.5); a failed ping is retried after a minute.
+- **elephant/goldfish switch**: `/eg on`, `/eg off` (or `/eg` for the state), or the `◉ elephant/goldfish` / `○ elephant/goldfish` button on the band. It exists only in a project whose `.claude/commands` holds at least one `eg-*.md`; elsewhere the button is hidden and the switch does nothing. The flag is saved in `~/.claude/elephant-goldfish.json`. While on, each prompt you type carries a short note sending real work to the matching command file (a bug to `eg-fix-bug.md`, a new feature to `eg-new-feature.md`, an idea to `eg-brainstorm.md`, a spec to `eg-prd.md`, and `eg-precommit-review.md` before any commit) and answering quick things directly.
 
 ## Tools
 

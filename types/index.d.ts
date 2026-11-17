@@ -79,6 +79,10 @@ declare module 'claude-code' {
       lastWorkerAt: number
       /** The on/off switch, mirrored from ~/.claude/sennable-flow.json so it holds across sessions. */
       mode: { on: boolean }
+      /** The elephant/goldfish switch, mirrored from ~/.claude/elephant-goldfish.json. */
+      egMode: { on: boolean }
+      /** Whether the working directory has a .claude/commands/eg-*.md; the switch applies only then. */
+      egAvailable: boolean
       /** Keep-warm ping, this session only: on until `until`, `pings` sent, `retryAt` after a failed ping. */
       keepWarm: { on: boolean; until: number; pings: number; retryAt: number }
       /** Who holds and who waits for what, per the collision-guard lock folder (polled every 2 s). */
